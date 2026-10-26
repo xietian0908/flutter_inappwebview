@@ -8,6 +8,17 @@ import 'package:flutter/widgets.dart';
 import '../platform_util.dart';
 import '_static_channel.dart';
 
+/// Identifies the current Dart isolate.
+///
+/// It is initialized once per isolate, so it changes after a hot restart (but
+/// not after a hot reload). The native Windows side uses it to detect and
+/// dispose the platform views left behind by the previous isolate: their
+/// WebView2 input surface would otherwise keep blocking mouse input over the
+/// desktop.
+/// See https://github.com/pichillilorenzo/flutter_inappwebview/issues/2789
+final String windowsPlatformViewSessionId =
+    '${DateTime.now().microsecondsSinceEpoch}-${identityHashCode(Object())}';
+
 const Map<String, SystemMouseCursor> _cursors = {
   'none': SystemMouseCursors.none,
   'basic': SystemMouseCursors.basic,

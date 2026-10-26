@@ -344,6 +344,7 @@ class WindowsInAppWebViewWidget extends PlatformInAppWebViewWidget {
             params.initialUserScripts?.map((e) => e.toMap()).toList() ?? [],
         'keepAliveId': params.keepAlive?.id,
         'webViewEnvironmentId': params.webViewEnvironment?.id,
+        'sessionId': windowsPlatformViewSessionId,
       },
     );
   }

@@ -119,13 +119,31 @@ namespace flutter_inappwebview_plugin
     auto webViewEnvironmentId = get_optional_fl_map_value<std::string>(*arguments, "webViewEnvironmentId");
     auto keepAliveId = get_optional_fl_map_value<std::string>(*arguments, "keepAliveId");
     auto windowId = get_optional_fl_map_value<int64_t>(*arguments, "windowId");
+    auto sessionId = get_optional_fl_map_value<std::string>(*arguments, "sessionId");
+
+    // a different session id means the Dart isolate has been restarted: the
+    // platform views owned by the previous isolate are unreachable now, so
+    // destroy them before creating the new one.
+    if (sessionId.has_value()) {
+      disposeStaleWebViews(sessionId.value());
+    }
+
+    HWND flutterWindowHWnd = plugin->registrar->GetView()->GetNativeWindow();
 
     RECT bounds;
-    GetClientRect(plugin->registrar->GetView()->GetNativeWindow(), &bounds);
+    GetClientRect(flutterWindowHWnd, &bounds);
 
-    auto hwnd = CreateWindowEx(0, windowClass_.lpszClassName, L"", 0, 0,
-      0, bounds.right - bounds.left, bounds.bottom - bounds.top,
-      plugin->registrar->GetView()->GetNativeWindow(),
+    // create the window at the current Flutter window position instead of
+    // the (0, 0) screen origin, so the WebView2 input region never sits over
+    // an area of the desktop not covered by the app before the first
+    // setPosition call coming from the Dart side.
+    RECT flutterWindowRect;
+    GetWindowRect(flutterWindowHWnd, &flutterWindowRect);
+
+    auto hwnd = CreateWindowEx(0, windowClass_.lpszClassName, L"", 0,
+      flutterWindowRect.left, flutterWindowRect.top,
+      bounds.right - bounds.left, bounds.bottom - bounds.top,
+      flutterWindowHWnd,
       nullptr,
       windowClass_.hInstance, nullptr);
 
@@ -165,6 +183,19 @@ namespace flutter_inappwebview_plugin
           };
 
           auto inAppWebView = std::make_unique<InAppWebView>(plugin, params, hwnd, std::move(webViewEnv), std::move(webViewController), std::move(webViewCompositionController));
+
+          if (sessionId.has_value() && sessionId.value() != sessionId_) {
+            // The Dart isolate that requested this webview has been restarted
+            // while it was being created: drop it instead of registering a
+            // view that nobody can dispose anymore.
+            return;
+          }
+
+          // the window can be minimized while the webview is being created
+          // (e.g. after a hot restart): keep it hidden until it is restored.
+          if (IsIconic(flutterWindowHWnd)) {
+            inAppWebView->hide();
+          }
 
           std::optional<std::shared_ptr<URLRequest>> urlRequest = urlRequestMap.has_value() ? std::make_shared<URLRequest>(urlRequestMap.value()) : std::optional<std::shared_ptr<URLRequest>>{};
           if (urlRequest.has_value()) {
@@ -219,6 +250,60 @@ namespace flutter_inappwebview_plugin
       }
       keepAliveWebViews.erase(keepAliveId);
     }
+  }
+
+  void InAppWebViewManager::setWindowVisibility(HWND topLevelWindow, bool visible)
+  {
+    auto applyVisibility = [topLevelWindow, visible](CustomPlatformView* platformView)
+      {
+        if (!platformView || !platformView->view) {
+          return;
+        }
+        // webviews belong to the top-level window that owns their host window,
+        // so apply only to the ones hosted by the window being minimized/restored.
+        if (GetAncestor(platformView->hwnd(), GA_ROOTOWNER) != topLevelWindow) {
+          return;
+        }
+        if (visible) {
+          platformView->view->show();
+        }
+        else {
+          platformView->view->hide();
+        }
+      };
+
+    for (auto& [id, platformView] : webViews) {
+      applyVisibility(platformView.get());
+    }
+    for (auto& [keepAliveId, platformView] : keepAliveWebViews) {
+      applyVisibility(platformView.get());
+    }
+  }
+
+  void InAppWebViewManager::disposeStaleWebViews(const std::string& sessionId)
+  {
+    if (sessionId.empty() || sessionId == sessionId_) {
+      return;
+    }
+    sessionId_ = sessionId;
+
+    // This is the first webview created by a new Dart isolate, so the ones
+    // created before belong to an obsolete isolate (hot restart): their Dart
+    // controllers are gone and their WebView2 input surface would otherwise
+    // stay on screen blocking mouse input over the desktop.
+    for (auto& [id, platformView] : webViews) {
+      if (platformView) {
+        platformView->UnregisterMethodCallHandler();
+      }
+    }
+    webViews.clear();
+
+    for (auto& [keepAliveId, platformView] : keepAliveWebViews) {
+      if (platformView) {
+        platformView->UnregisterMethodCallHandler();
+      }
+    }
+    keepAliveWebViews.clear();
   }
 
   bool InAppWebViewManager::isGraphicsCaptureSessionSupported()
